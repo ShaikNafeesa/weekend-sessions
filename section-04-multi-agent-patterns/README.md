@@ -21,7 +21,8 @@ jupyter lab
 Each notebook has a `_groq` twin; install `requirements-groq.txt` instead of `requirements.txt`. Set `TAVILY_API_KEY` in your shell or the repo-root `.env` for notebook 1.
 
 - Notebook 1's supervisor prompt has one extra line: gpt-oss tends to ask the user to narrow a broad question instead of delegating, so it is told to pick sensible defaults and delegate straight away.
-- These notebooks make many model calls. On Groq's free tier (about 8,000 tokens/minute per model) they run slower than on Bedrock, with automatic `rate limit` retries along the way. If you run out of daily tokens, switch `GROQ_MODEL_ID`.
+- Notebook 1 is the heaviest lab on Groq's free tier, which rejects any single request over 8,000 tokens. So its workers search with a compact `web_search` tool (Tavily, top 3 results, at most two searches per task) instead of the full `tavily_search`, and the "try different questions" cell asks one extra question with a fresh supervisor conversation. It takes about 15 minutes, and each question uses ~30–55k tokens: run it on a model with plenty of its 200k daily tokens left. `qwen/qwen3.8-27b` works (slower: 1,000 output tokens/minute); `openai/gpt-oss-20b` often sends malformed tool calls here.
+- All four notebooks make many model calls, so on the free tier they run slower than on Bedrock, with automatic `rate limit` retries along the way. If you run out of daily tokens, switch `GROQ_MODEL_ID` — or run them on a local model with no limits at all (see "Run on a local model" in the repo README), at the cost of speed.
 
 ## Choosing a pattern
 

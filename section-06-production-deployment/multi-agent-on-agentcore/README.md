@@ -179,12 +179,12 @@ The runtimes' CloudWatch log groups (`/aws/bedrock-agentcore/runtimes/...`) are 
 export GROQ_API_KEY=...            # or: set -a; source ../../.env; set +a
 export GROQ_MODEL_ID=openai/gpt-oss-120b
 
-# Step 2 — MCP server: unchanged
+# Step 2 — MCP server: unchanged (optionally add --disable-memory --deployment-type container to its configure too)
 
 # Step 3 — Stock Agent
 agentcore configure -e stock_a2a_agent_groq.py --protocol A2A \
   --requirements-file requirements-groq.txt --authorizer-config "$AUTH_CONFIG" \
-  --region $REGION --non-interactive
+  --region $REGION --non-interactive --disable-memory --deployment-type container
 agentcore deploy --agent stock_a2a_agent_groq \
   --env PORT=9000 --env STOCK_MCP_URL=$STOCK_MCP_URL --env AGENT_BEARER_TOKEN=$BEARER_TOKEN \
   --env GROQ_API_KEY="$GROQ_API_KEY" --env GROQ_MODEL_ID=$GROQ_MODEL_ID
@@ -193,7 +193,7 @@ agentcore deploy --agent stock_a2a_agent_groq \
 # Step 4 — Orchestrator
 agentcore configure -e orchestrator_groq.py --protocol A2A \
   --requirements-file requirements-groq.txt --authorizer-config "$AUTH_CONFIG" \
-  --region $REGION --non-interactive
+  --region $REGION --non-interactive --disable-memory --deployment-type container
 agentcore deploy --agent orchestrator_groq \
   --env STOCK_A2A_URL=$STOCK_A2A_URL --env AGENT_BEARER_TOKEN=$BEARER_TOKEN \
   --env GROQ_API_KEY="$GROQ_API_KEY" --env GROQ_MODEL_ID=$GROQ_MODEL_ID
@@ -207,5 +207,7 @@ aws cognito-idp delete-user-pool --user-pool-id $POOL_ID --region $REGION
 
 - The answer streams back in many parts; to print all of it use `jq -r '[.result.artifacts[0].parts[].text] | join("")'` instead of `.parts[0].text`.
 - `GROQ_API_KEY` is stored as a runtime environment variable (visible in the console); for production use Secrets Manager or AgentCore Identity.
-- The toolkit gives each agent a short-term memory by default (~2.5 minutes to create); this lab doesn't use it, so `--disable-memory` on `configure` saves time. Each deploy takes several minutes, and the Cognito token lasts an hour — run `cognito_refresh_token` before deploys that pass `AGENT_BEARER_TOKEN`.
-- Tested: the full local system, and the MCP server + Stock Agent deployed on AgentCore. The deployed orchestrator step was cut short by an account clean-up job during testing.
+- `--deployment-type container` builds each image in CodeBuild, so only your source (a few KB) is uploaded; the default direct code deploy uploads a ~100 MB zip per agent, which is painful on a slow connection. `--disable-memory` skips the short-term memory the toolkit would otherwise create for each agent (~2.5 minutes; this lab doesn't use it).
+- The Cognito token lasts an hour and is fixed into each agent at deploy time: run `cognito_refresh_token` before every deploy that passes `AGENT_BEARER_TOKEN`, and run Step 5 within the hour.
+- Step 6 doesn't remove everything: `agentcore destroy` leaves the `bedrock-agentcore-codebuild-sources-<account>-<region>` S3 bucket, the runtime and CodeBuild log groups, the trace delivery sources/destinations, the `aws/spans` log group and the `TransactionSearchXRayAccess` logs resource policy. Delete them in the console (CloudWatch → Logs, S3) if you don't need them.
+- Tested end to end on AgentCore Runtime with `openai/gpt-oss-120b`: orchestrator → Stock Agent → MCP server, one request traced through all three runtimes.
