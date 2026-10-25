@@ -66,10 +66,10 @@ curl -s -X POST http://localhost:9000/ \
     "params": {"message": {"role": "user",
       "parts": [{"kind": "text", "text": "How is NVDA stock doing today?"}],
       "messageId": "test-1"}}
-  }' | jq -r '[.result.artifacts[0].parts[].text] | join("")'
+  }' | jq -r 'if .result.artifacts then [.result.artifacts[0].parts[].text] | join("") else (.error // .result.status) end'
 ```
 
-Or talk to the Stock Agent directly by changing the port to `9001`. Expect something like "NVIDIA Corporation (NVDA) is currently trading at **$…**, down **…%**". The agents stream their answer, so it arrives split into many `parts`; the `join("")` above glues them back together (`.parts[0].text` alone prints only the first word or letter). If the answer is `null` or empty, run the curl with `| jq .` instead: `"state": "failed"` means the agent hit an error — the reason is in Terminal 2 or 3 (often `ExpiredToken` or the model-access message).
+Or talk to the Stock Agent directly by changing the port to `9001`. Expect something like "NVIDIA Corporation (NVDA) is currently trading at **$…**, down **…%**". The agents stream their answer, so it arrives split into many `parts`; the `join("")` above glues them back together (`.parts[0].text` alone prints only the first word or letter). If you get `{"state":"failed", ... "Agent execution failed"}` instead, the agent hit an error and the reason is printed in Terminal 2 or 3. Most often that terminal is missing your AWS profile or model (`ExpiredToken`, or the model-access message): stop it, run the `source` line, and start it again.
 
 ## Part 2 — Deploy all three to AgentCore Runtime
 
@@ -171,7 +171,7 @@ curl -s -X POST "https://bedrock-agentcore.$REGION.amazonaws.com/runtimes/$(echo
   }' | jq .
 ```
 
-Expect `"state": "completed"` and the answer split across many `parts` (the agents stream it). To read it as one piece, end the command with `| jq -r '[.result.artifacts[0].parts[].text] | join("")'` instead of `| jq .`. The first call takes 30–45 s (three cold starts in a row).
+Expect `"state": "completed"` and the answer split across many `parts` (the agents stream it). To read it as one piece, end the command with `| jq -r 'if .result.artifacts then [.result.artifacts[0].parts[].text] | join("") else (.error // .result.status) end'` instead of `| jq .` (it prints the failure status if there's no answer). The first call takes 30–45 s (three cold starts in a row).
 
 To confirm the whole chain ran, tail each runtime's log group, `aws logs tail /aws/bedrock-agentcore/runtimes/<agent-id>-DEFAULT --since 10m` (the agent ID is the last part of its ARN): the orchestrator logs a POST to the stock agent's URL, the stock agent logs `POST /`, and the MCP server logs a `CallToolRequest`. A `401` in those logs means the bearer token baked into an agent has expired — run `cognito_refresh_token` and redeploy that agent with `--auto-update-on-conflict`.
 
@@ -236,7 +236,7 @@ agentcore destroy --agent stock_mcp_server --force --delete-ecr-repo
 aws cognito-idp delete-user-pool --user-pool-id $POOL_ID --region $REGION
 ```
 
-- The answer streams back in many parts; to print all of it use `jq -r '[.result.artifacts[0].parts[].text] | join("")'` instead of `.parts[0].text`.
+- The answer streams back in many parts; to print all of it use `jq -r 'if .result.artifacts then [.result.artifacts[0].parts[].text] | join("") else (.error // .result.status) end'` instead of `.parts[0].text` (it prints the failure status if there's no answer).
 - `GROQ_API_KEY` is stored as a runtime environment variable (visible in the console); for production use Secrets Manager or AgentCore Identity.
 - `--deployment-type container` builds each image in CodeBuild, so only your source (a few KB) is uploaded; the default direct code deploy uploads a ~100 MB zip per agent, which is painful on a slow connection. `--disable-memory` skips the short-term memory the toolkit would otherwise create for each agent (~2.5 minutes; this lab doesn't use it).
 - The Cognito token lasts an hour and is fixed into each agent at deploy time: run `cognito_refresh_token` before every deploy that passes `AGENT_BEARER_TOKEN`, and run Step 5 within the hour.
