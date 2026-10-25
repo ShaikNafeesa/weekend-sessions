@@ -110,7 +110,7 @@ In the configure summary, **Authorization must not say `IAM (default)`** — tha
 
 ### Step 3: Deploy the Stock Agent
 
-On AgentCore, A2A agents listen on port 9000, so the deploy passes `PORT=9000`. It also passes the MCP server's URL and your token (`AGENT_BEARER_TOKEN`), which the agent uses to call the MCP server. That token is fixed into the agent when you deploy, and the orchestrator gets one the same way in Step 4, so the deployed chain works for a day after these deploys; after that, re-run Step 3's second block and Step 4 to give the agents fresh tokens.
+On AgentCore, A2A agents listen on port 9000, so the deploy passes `PORT=9000`. It also passes the MCP server's URL and your token (`AGENT_BEARER_TOKEN`), which the agent uses to call the MCP server. That token is fixed into the agent when you deploy, and the orchestrator gets one the same way in Step 4, so the deployed chain works for a day after these deploys; after that, give the agents fresh tokens with the block under Step 5.
 
 ```bash
 source session.sh && \
@@ -167,7 +167,22 @@ curl -s -X POST "${ORCH_URL}?qualifier=DEFAULT" \
 
 Expect something like "NVIDIA Corporation (NVDA) is currently trading at **$…**, down **…%**". The first call takes 30–45 s (three cold starts in a row). The agents stream their answer in many `parts`; the `jq` filter joins them, and prints the failure status instead if there's no answer (replace it with `jq .` to see the raw response).
 
-To confirm the whole chain ran, tail each runtime's log group, `aws logs tail /aws/bedrock-agentcore/runtimes/<agent-id>-DEFAULT --since 10m` (the agent ID is the last part of its ARN): the orchestrator logs a POST to the stock agent's URL, the stock agent logs `POST /`, and the MCP server logs a `CallToolRequest`. A `401` in those logs means the token fixed into an agent at deploy time has expired (a day after that deploy): re-run Step 3's second block and Step 4 — each updates its agent in place with a fresh token.
+To confirm the whole chain ran, tail each runtime's log group, `aws logs tail /aws/bedrock-agentcore/runtimes/<agent-id>-DEFAULT --since 10m` (the agent ID is the last part of its ARN): the orchestrator logs a POST to the stock agent's URL, the stock agent logs `POST /`, and the MCP server logs a `CallToolRequest`. A `401` in those logs means the token fixed into an agent at deploy time has expired (a day after that deploy).
+
+**Refresh the agents' tokens** (a day after Steps 3–4, or whenever Step 5 reports a `401`). This redeploys both agents in place with a fresh token. It deliberately skips `agentcore configure`: re-running configure on an agent that's already deployed makes `agentcore destroy` keep that agent's memory later.
+
+```bash
+source session.sh && \
+STOCK_MCP_URL=$(runtime_url stock_mcp_server mcp) && \
+STOCK_A2A_URL=$(runtime_url stock_a2a_agent) && \
+agentcore deploy --agent stock_a2a_agent --auto-update-on-conflict \
+  --env PORT=9000 --env "STOCK_MCP_URL=$STOCK_MCP_URL" --env "AGENT_BEARER_TOKEN=$BEARER_TOKEN" \
+  --env "BEDROCK_MODEL_ID=${BEDROCK_MODEL_ID:-global.anthropic.claude-sonnet-4-6}" \
+  --env "AGENTCORE_RUNTIME_URL=$STOCK_A2A_URL" && \
+agentcore deploy --agent orchestrator --auto-update-on-conflict \
+  --env "STOCK_A2A_URL=$STOCK_A2A_URL" --env "AGENT_BEARER_TOKEN=$BEARER_TOKEN" \
+  --env "BEDROCK_MODEL_ID=${BEDROCK_MODEL_ID:-global.anthropic.claude-sonnet-4-6}"
+```
 
 ### Step 6: Clean up
 
@@ -175,10 +190,16 @@ To confirm the whole chain ran, tail each runtime's log group, `aws logs tail /a
 agentcore destroy --agent orchestrator --force --delete-ecr-repo
 agentcore destroy --agent stock_a2a_agent --force --delete-ecr-repo
 agentcore destroy --agent stock_mcp_server --force --delete-ecr-repo
+# Delete any of this lab's memories that destroy kept (see below)
+for id in $(aws bedrock-agentcore-control list-memories --region "${REGION:-us-east-1}" \
+    --query "memories[?status=='ACTIVE' && (starts_with(id,'orchestrator_mem-') || starts_with(id,'stock_a2a_agent_mem-') || starts_with(id,'stock_mcp_server_mem-'))].id" \
+    --output text); do
+  aws bedrock-agentcore-control delete-memory --memory-id "$id" --region "${REGION:-us-east-1}" > /dev/null && echo "Deleted memory $id"
+done
 source session.sh && aws cognito-idp delete-user-pool --user-pool-id "$POOL_ID" --region "$REGION" && rm .env.cognito
 ```
 
-`agentcore destroy` removes each runtime with its IAM role, memory, workload identity and uploaded code. Kept, so you can read them later — delete them in the CloudWatch console (or with `aws logs delete-log-group`) when you no longer need them:
+`agentcore destroy` removes each runtime with its IAM role, memory, workload identity and uploaded code. One exception: if `agentcore configure` was run again on an agent after its first deploy, `destroy` prints `Memory ... preserved (was pre-existing)` and keeps that memory. The loop after the destroys deletes those; when there are none, it prints nothing. Kept, so you can read them later — delete them in the CloudWatch console (or with `aws logs delete-log-group`) when you no longer need them:
 
 - the runtimes' log groups, `/aws/bedrock-agentcore/runtimes/<agent-id>-DEFAULT`
 - the memories' log groups, `/aws/vendedlogs/bedrock-agentcore/memory/APPLICATION_LOGS/<memory-id>`
@@ -197,7 +218,8 @@ Leave the account-level setup the toolkit made on your first deploy — the `bed
 | The configure summary says `Authorization: IAM (default)` | `agentcore configure` ran without the Cognito authorizer (outside these blocks, or with an empty `$AUTH_CONFIG`) — callers with a bearer token will be rejected | `agentcore destroy --agent <name> --force --delete-ecr-repo`, then run its step again |
 | `ExpiredTokenException` from an `aws` or `agentcore` command | The terminal isn't using your SSO profile, or the session expired | See the section README's troubleshooting table |
 | Step 5 prints `"code": -32001, "message": "Token has expired"` | The token in your request has expired, so AgentCore rejects it before the orchestrator runs (nothing shows in its logs). The Step 5 block fetches a fresh one each time; this happens when a request reuses `$BEARER_TOKEN` set by an earlier command | Paste Step 5 as written |
-| Step 5 answers with an apology instead of a price ("…returned a 401 Unauthorized error…"); the orchestrator's log shows `GET …stock_a2a_agent…/.well-known/agent-card.json "HTTP/1.1 401 Unauthorized"` | The token fixed into the orchestrator or the Stock Agent at deploy time has expired (a day after that deploy) | Re-run Step 3's second block and Step 4, then Step 5 |
+| Step 5 answers with an apology instead of a price ("…returned a 401 Unauthorized error…"); the orchestrator's log shows `GET …stock_a2a_agent…/.well-known/agent-card.json "HTTP/1.1 401 Unauthorized"` | The token fixed into the orchestrator or the Stock Agent at deploy time has expired (a day after that deploy) | Paste the refresh block under Step 5, then Step 5 |
+| `agentcore destroy` warns `Memory ... preserved (was pre-existing)`, and the memory is still listed in the console afterwards | `agentcore configure` was run again on that agent after its first deploy, so the toolkit treats the memory as one it didn't create, and `destroy` leaves it | The memory loop in Step 6 deletes it |
 
 ## Notes
 
@@ -245,6 +267,7 @@ agentcore deploy --agent orchestrator_groq \
 agentcore destroy --agent orchestrator_groq --force --delete-ecr-repo
 agentcore destroy --agent stock_a2a_agent_groq --force --delete-ecr-repo
 agentcore destroy --agent stock_mcp_server --force --delete-ecr-repo
+# + Step 6's memory loop, if destroy said "Memory ... preserved" (the Groq agents have no memory; the MCP server does)
 source session.sh && aws cognito-idp delete-user-pool --user-pool-id "$POOL_ID" --region "$REGION" && rm .env.cognito
 ```
 
