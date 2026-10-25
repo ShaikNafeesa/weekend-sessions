@@ -80,7 +80,7 @@ pip install bedrock-agentcore-starter-toolkit
 export REGION=us-east-1
 ```
 
-Run all of Part 2 **in one terminal** (the Cognito script exports variables the later steps use), from this lab folder, with your AWS profile set (`set -a; source ../../.env; set +a`). It takes about 25 minutes: each deploy is 2–6 minutes (`configure` also sets up an AgentCore memory for each agent, which `destroy` removes). Every `agentcore` command prints a "Starter Toolkit CLI is no longer supported" recommendation; this lab still works with it — `export AGENTCORE_SUPPRESS_RECOMMENDATION=1` hides the message. Deploys may also print a one-time `Failed to enable observability ... X-Ray Delivery Destination` warning on a fresh account; the deploy continues. If Claude isn't enabled in your account, `export BEDROCK_MODEL_ID=us.amazon.nova-2-lite-v1:0` first — the deploy commands below pass it to the agents.
+Run all of Part 2 **in one terminal** (the Cognito script exports variables the later steps use), from this lab folder, with your AWS profile set (the venv loads `.env` if you did the section README's setup; otherwise `set -a; source ../../.env; set +a`). Every value below — ARNs and URLs included — is filled in by the commands themselves, so you can paste each block as it is. It takes about 25 minutes: each deploy is 2–6 minutes (`configure` also sets up an AgentCore memory for each agent, which `destroy` removes). Every `agentcore` command prints a "Starter Toolkit CLI is no longer supported" recommendation; this lab still works with it — `export AGENTCORE_SUPPRESS_RECOMMENDATION=1` hides the message. Deploys may also print a one-time `Failed to enable observability ... X-Ray Delivery Destination` warning on a fresh account; the deploy continues. If Claude isn't enabled in your account, `export BEDROCK_MODEL_ID=us.amazon.nova-2-lite-v1:0` first — the deploy commands below pass it to the agents.
 
 ### Step 1: Cognito user pool for OAuth
 
@@ -98,7 +98,10 @@ Build the authorizer configuration once:
 
 ```bash
 export AUTH_CONFIG="{\"customJWTAuthorizer\":{\"discoveryUrl\":\"$DISCOVERY_URL\",\"allowedClients\":[\"$CLIENT_ID\"]}}"
+echo "$AUTH_CONFIG"      # must show your discovery URL and client ID
 ```
+
+If those two values are empty, Step 1 didn't run in this terminal. Don't continue: `agentcore configure` would fall back to IAM authorization (it prints `Using default IAM authorization` / `Authorization: IAM (default)`), and the bearer-token calls in Steps 3–5 would be rejected. If an agent was already configured that way, remove it with its Step 6 `destroy` command and configure it again here.
 
 ### Step 2: Deploy the MCP server
 
@@ -109,11 +112,13 @@ agentcore configure -e stock_mcp_server.py --protocol MCP \
 agentcore deploy --agent stock_mcp_server
 ```
 
-Copy the agent ARN from the output (or `agentcore status`) and build the MCP URL:
+Look up its ARN and build the MCP URL:
 
 ```bash
-export MCP_ARN="<stock_mcp_server runtime ARN>"
+export MCP_ARN=$(aws bedrock-agentcore-control list-agent-runtimes --region $REGION \
+  --query "agentRuntimes[?agentRuntimeName=='stock_mcp_server'].agentRuntimeArn" --output text)
 export STOCK_MCP_URL="https://bedrock-agentcore.$REGION.amazonaws.com/runtimes/$(echo -n $MCP_ARN | jq -sRr '@uri')/invocations?qualifier=DEFAULT"
+echo "$STOCK_MCP_URL"    # must contain ...runtime%2Fstock_mcp_server-...; if not, the deploy hasn't finished
 ```
 
 ### Step 3: Deploy the Stock Agent
@@ -130,7 +135,8 @@ agentcore deploy --agent stock_a2a_agent \
   --env PORT=9000 --env STOCK_MCP_URL=$STOCK_MCP_URL --env AGENT_BEARER_TOKEN=$BEARER_TOKEN \
   --env BEDROCK_MODEL_ID=${BEDROCK_MODEL_ID:-global.anthropic.claude-sonnet-4-6}
 
-export STOCK_A2A_ARN="<stock_a2a_agent runtime ARN>"
+export STOCK_A2A_ARN=$(aws bedrock-agentcore-control list-agent-runtimes --region $REGION \
+  --query "agentRuntimes[?agentRuntimeName=='stock_a2a_agent'].agentRuntimeArn" --output text)
 export STOCK_A2A_URL="https://bedrock-agentcore.$REGION.amazonaws.com/runtimes/$(echo -n $STOCK_A2A_ARN | jq -sRr '@uri')/invocations/"
 ```
 
@@ -153,7 +159,8 @@ agentcore deploy --agent orchestrator \
   --env STOCK_A2A_URL=$STOCK_A2A_URL --env AGENT_BEARER_TOKEN=$BEARER_TOKEN \
   --env BEDROCK_MODEL_ID=${BEDROCK_MODEL_ID:-global.anthropic.claude-sonnet-4-6}
 
-export ORCH_ARN="<orchestrator runtime ARN>"
+export ORCH_ARN=$(aws bedrock-agentcore-control list-agent-runtimes --region $REGION \
+  --query "agentRuntimes[?agentRuntimeName=='orchestrator'].agentRuntimeArn" --output text)
 ```
 
 ### Step 5: Test
