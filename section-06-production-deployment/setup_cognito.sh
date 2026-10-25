@@ -39,12 +39,15 @@ _cognito_setup() {
       --region "$REGION" --query 'UserPool.Id' --output text)
     [ -n "$POOL_ID" ] && [ "$POOL_ID" != "None" ] || { echo "Error: could not create the user pool." >&2; return 1; }
 
-    # App client (public client, username/password auth)
+    # App client (public client, username/password auth). Access tokens last 1 day
+    # (Cognito's maximum; the default is 1 hour) because the deployed agents call each
+    # other with the token they were deployed with — see the multi-agent README.
     CLIENT_ID=$(aws cognito-idp create-user-pool-client \
       --user-pool-id "$POOL_ID" \
       --client-name "AgentCoreClient" \
       --no-generate-secret \
       --explicit-auth-flows "ALLOW_USER_PASSWORD_AUTH" "ALLOW_REFRESH_TOKEN_AUTH" \
+      --access-token-validity 1 --token-validity-units AccessToken=days \
       --region "$REGION" --query 'UserPoolClient.ClientId' --output text)
     [ -n "$CLIENT_ID" ] && [ "$CLIENT_ID" != "None" ] || { echo "Error: could not create the app client." >&2; return 1; }
 
@@ -69,7 +72,7 @@ _cognito_setup() {
   cognito_refresh_token
 }
 
-# Get a fresh access token (they expire after 1 hour). Call this again any time.
+# Get a fresh access token (it lasts 1 day). Call this again any time.
 cognito_refresh_token() {
   BEARER_TOKEN=$(aws cognito-idp initiate-auth \
     --client-id "$CLIENT_ID" \
@@ -83,7 +86,7 @@ cognito_refresh_token() {
   echo "Pool ID:       $POOL_ID   (saved in .env.cognito)"
   echo "Client ID:     $CLIENT_ID"
   echo "Discovery URL: $DISCOVERY_URL"
-  echo "Bearer Token:  ${BEARER_TOKEN:0:25}...  (exported as \$BEARER_TOKEN, valid for 1 hour)"
+  echo "Bearer Token:  ${BEARER_TOKEN:0:25}...  (exported as \$BEARER_TOKEN, valid for 1 day)"
   echo "Auth config:   exported as \$AUTH_CONFIG"
   echo ""
 }
