@@ -47,7 +47,14 @@ python orchestrator.py
 ```
 
 - **Wait for the MCP server.** The stock agent connects to it as it starts. The server's first start can take ~30 s; if Terminal 2 starts too early it exits with a connection error (`ConnectError: All connection attempts failed` / `MCPClientInitializationError`) — just start it again.
-- **Port 8000 already in use?** The MCP server always uses 8000 (AgentCore expects it there). Find what holds it with `lsof -nP -iTCP:8000 -sTCP:LISTEN` and stop that first.
+- **Another app on port 8000?** The MCP server always uses 8000 (AgentCore expects it there). On macOS it can still start next to an app listening on `127.0.0.1:8000`, but `localhost:8000` then reaches the other app, and the stock agent fails with `POST http://localhost:8000/mcp "HTTP/1.1 404 Not Found"` followed by `McpError: Session terminated`. See what's listening with `lsof -nP -iTCP:8000 -sTCP:LISTEN`, and stop the other app. Or, for the local test only, run the MCP server on another port and point the stock agent at it:
+  ```bash
+  # Terminal 1
+  python -c "import stock_mcp_server as s; s.mcp.settings.port = 8010; s.mcp.run(transport='streamable-http')"
+  # Terminal 2, before python stock_a2a_agent.py
+  export STOCK_MCP_URL=http://localhost:8010/mcp
+  ```
+- **`Found credentials in shared credentials file` in Terminal 2 or 3** means `AWS_PROFILE` isn't set in that terminal, so calls will use your old default credentials — run the `source` line first.
 
 Talk to the orchestrator (Terminal 4):
 
