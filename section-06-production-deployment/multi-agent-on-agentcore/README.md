@@ -47,7 +47,14 @@ python orchestrator.py
 ```
 
 - **Wait for the MCP server.** The stock agent connects to it as it starts. The server's first start can take ~30 s; if Terminal 2 starts too early it exits with a connection error (`ConnectError: All connection attempts failed` / `MCPClientInitializationError`) — just start it again.
-- **Port 8000 already in use?** The MCP server always uses 8000 (AgentCore expects it there). Find what holds it with `lsof -nP -iTCP:8000 -sTCP:LISTEN` and stop that first.
+- **Another app on port 8000?** The MCP server always uses 8000 (AgentCore expects it there). On macOS it can still start next to an app listening on `127.0.0.1:8000`, but `localhost:8000` then reaches the other app, and the stock agent fails with `POST http://localhost:8000/mcp "HTTP/1.1 404 Not Found"` followed by `McpError: Session terminated`. See what's listening with `lsof -nP -iTCP:8000 -sTCP:LISTEN`, and stop the other app. Or, for the local test only, run the MCP server on another port and point the stock agent at it:
+  ```bash
+  # Terminal 1
+  python -c "import stock_mcp_server as s; s.mcp.settings.port = 8010; s.mcp.run(transport='streamable-http')"
+  # Terminal 2, before python stock_a2a_agent.py
+  export STOCK_MCP_URL=http://localhost:8010/mcp
+  ```
+- **`Found credentials in shared credentials file` in Terminal 2 or 3** means `AWS_PROFILE` isn't set in that terminal, so calls will use your old default credentials — run the `source` line first.
 
 Talk to the orchestrator (Terminal 4):
 
@@ -59,100 +66,94 @@ curl -s -X POST http://localhost:9000/ \
     "params": {"message": {"role": "user",
       "parts": [{"kind": "text", "text": "How is NVDA stock doing today?"}],
       "messageId": "test-1"}}
-  }' | jq -r '[.result.artifacts[0].parts[].text] | join("")'
+  }' | jq -r 'if .result.artifacts then [.result.artifacts[0].parts[].text] | join("") else (.error // .result.status) end'
 ```
 
-Or talk to the Stock Agent directly by changing the port to `9001`. Expect something like "NVIDIA Corporation (NVDA) is currently trading at **$…**, down **…%**". The agents stream their answer, so it arrives split into many `parts`; the `join("")` above glues them back together (`.parts[0].text` alone prints only the first word or letter). If the answer is `null` or empty, run the curl with `| jq .` instead: `"state": "failed"` means the agent hit an error — the reason is in Terminal 2 or 3 (often `ExpiredToken` or the model-access message).
+Or talk to the Stock Agent directly by changing the port to `9001`. Expect something like "NVIDIA Corporation (NVDA) is currently trading at **$…**, down **…%**". The agents stream their answer, so it arrives split into many `parts`; the `join("")` above glues them back together (`.parts[0].text` alone prints only the first word or letter). If you get `{"state":"failed", ... "Agent execution failed"}` instead, the agent hit an error and the reason is printed in Terminal 2 or 3. Most often that terminal is missing your AWS profile or model (`ExpiredToken`, or the model-access message): stop it, run the `source` line, and start it again.
 
 ## Part 2 — Deploy all three to AgentCore Runtime
 
-You need the starter toolkit CLI (`pip install bedrock-agentcore-starter-toolkit` — note: AWS also ships a separate Node.js `agentcore` CLI with different commands; this lab uses the Python one) and `jq`:
+You need the starter toolkit CLI (`pip install bedrock-agentcore-starter-toolkit` — note: AWS also ships a separate Node.js `agentcore` CLI with different commands; this lab uses the Python one) and `jq`.
 
-```bash
-pip install bedrock-agentcore-starter-toolkit
-export REGION=us-east-1
-```
+**Paste each block below as it is — there's nothing to edit.** Run them from this lab folder, with your AWS login working (see "Before you start" in the section README). Every block starts with `source session.sh`, which:
 
-Run all of Part 2 **in one terminal** (the Cognito script exports variables the later steps use), from this lab folder, with your AWS profile set (`set -a; source ../../.env; set +a`). It takes about 25 minutes: each deploy is 2–6 minutes (`configure` also sets up an AgentCore memory for each agent, which `destroy` removes). Every `agentcore` command prints a "Starter Toolkit CLI is no longer supported" recommendation; this lab still works with it — `export AGENTCORE_SUPPRESS_RECOMMENDATION=1` hides the message. Deploys may also print a one-time `Failed to enable observability ... X-Ray Delivery Destination` warning on a fresh account; the deploy continues. If Claude isn't enabled in your account, `export BEDROCK_MODEL_ID=us.amazon.nova-2-lite-v1:0` first — the deploy commands below pass it to the agents.
+- loads the Cognito pool from Step 1 (saved in `.env.cognito` in this folder, git-ignored) and fetches a fresh token, so a block works in any terminal — the same one, a new one, or tomorrow;
+- sets `$AUTH_CONFIG`, the Cognito authorizer passed to `agentcore configure`;
+- provides `runtime_url <name>`, which looks up a deployed agent's URL by its name.
+
+The commands in a block are chained with `&&`, so if something is missing — an earlier step not done, an expired AWS login — the block stops with a message instead of deploying a half-configured agent.
+
+It takes about 25 minutes: each deploy is 2–6 minutes (`configure` also sets up an AgentCore memory for each agent, which `destroy` removes). Every `agentcore` command prints a "Starter Toolkit CLI is no longer supported" recommendation; this lab still works with it — `export AGENTCORE_SUPPRESS_RECOMMENDATION=1` hides the message. Deploys may also print a one-time `Failed to enable observability ... X-Ray Delivery Destination` warning on a fresh account; the deploy continues. If Claude isn't enabled in your account, `export BEDROCK_MODEL_ID=us.amazon.nova-2-lite-v1:0` first (or set it in `.env`) — the deploy commands pass it to the agents.
 
 ### Step 1: Cognito user pool for OAuth
 
-From this lab folder (`multi-agent-on-agentcore/`):
+Pick your own password (8+ characters):
 
 ```bash
-export COGNITO_USERNAME=testuser
-export COGNITO_PASSWORD='YourPassword123!'
-source ../setup_cognito.sh
+export REGION=us-east-1 COGNITO_USERNAME=testuser COGNITO_PASSWORD='YourPassword123!'
+source session.sh
 ```
 
-This exports `POOL_ID`, `CLIENT_ID`, `DISCOVERY_URL` and `BEARER_TOKEN`. The token is valid for 1 hour — run `cognito_refresh_token` in the same shell to get a new one.
-
-Build the authorizer configuration once:
-
-```bash
-export AUTH_CONFIG="{\"customJWTAuthorizer\":{\"discoveryUrl\":\"$DISCOVERY_URL\",\"allowedClients\":[\"$CLIENT_ID\"]}}"
-```
+It prints the pool ID, client ID, discovery URL and the start of a token, and saves the pool's details in `.env.cognito`. Running it again reuses the same pool — it never creates a second one. The pool's access tokens last a day (Cognito's default is an hour) — Step 3 explains why.
 
 ### Step 2: Deploy the MCP server
 
 ```bash
+source session.sh && \
 agentcore configure -e stock_mcp_server.py --protocol MCP \
   --requirements-file requirements.txt --authorizer-config "$AUTH_CONFIG" \
-  --region $REGION --non-interactive
+  --region "$REGION" --non-interactive && \
 agentcore deploy --agent stock_mcp_server
 ```
 
-Copy the agent ARN from the output (or `agentcore status`) and build the MCP URL:
-
-```bash
-export MCP_ARN="<stock_mcp_server runtime ARN>"
-export STOCK_MCP_URL="https://bedrock-agentcore.$REGION.amazonaws.com/runtimes/$(echo -n $MCP_ARN | jq -sRr '@uri')/invocations?qualifier=DEFAULT"
-```
+In the configure summary, **Authorization must not say `IAM (default)`** — that would mean the Cognito authorizer wasn't passed (see Troubleshooting below).
 
 ### Step 3: Deploy the Stock Agent
 
-On AgentCore, A2A agents listen on port 9000, so pass `PORT=9000`.
-
-Each deploy copies `$BEARER_TOKEN` into the agent (it uses it to call the next agent), and the token expires 1 hour after you created it. Refresh it right before this step and before Step 4: `cognito_refresh_token`.
+On AgentCore, A2A agents listen on port 9000, so the deploy passes `PORT=9000`. It also passes the MCP server's URL and your token (`AGENT_BEARER_TOKEN`), which the agent uses to call the MCP server. That token is fixed into the agent when you deploy, and the orchestrator gets one the same way in Step 4, so the deployed chain works for a day after these deploys; after that, re-run Step 3's second block and Step 4 to give the agents fresh tokens.
 
 ```bash
+source session.sh && \
+STOCK_MCP_URL=$(runtime_url stock_mcp_server mcp) && \
 agentcore configure -e stock_a2a_agent.py --protocol A2A \
   --requirements-file requirements.txt --authorizer-config "$AUTH_CONFIG" \
-  --region $REGION --non-interactive
+  --region "$REGION" --non-interactive && \
 agentcore deploy --agent stock_a2a_agent \
-  --env PORT=9000 --env STOCK_MCP_URL=$STOCK_MCP_URL --env AGENT_BEARER_TOKEN=$BEARER_TOKEN \
-  --env BEDROCK_MODEL_ID=${BEDROCK_MODEL_ID:-global.anthropic.claude-sonnet-4-6}
-
-export STOCK_A2A_ARN="<stock_a2a_agent runtime ARN>"
-export STOCK_A2A_URL="https://bedrock-agentcore.$REGION.amazonaws.com/runtimes/$(echo -n $STOCK_A2A_ARN | jq -sRr '@uri')/invocations/"
+  --env PORT=9000 --env "STOCK_MCP_URL=$STOCK_MCP_URL" --env "AGENT_BEARER_TOKEN=$BEARER_TOKEN" \
+  --env "BEDROCK_MODEL_ID=${BEDROCK_MODEL_ID:-global.anthropic.claude-sonnet-4-6}"
 ```
 
-Deploy once more so the agent card advertises the agent's public URL (A2A clients send their messages to the URL in the card):
+Deploy once more so the agent card advertises the agent's public URL (A2A clients send their messages to the URL in the card, and that URL only exists after the first deploy):
 
 ```bash
+source session.sh && \
+STOCK_MCP_URL=$(runtime_url stock_mcp_server mcp) && \
+STOCK_A2A_URL=$(runtime_url stock_a2a_agent) && \
 agentcore deploy --agent stock_a2a_agent --auto-update-on-conflict \
-  --env PORT=9000 --env STOCK_MCP_URL=$STOCK_MCP_URL --env AGENT_BEARER_TOKEN=$BEARER_TOKEN \
-  --env BEDROCK_MODEL_ID=${BEDROCK_MODEL_ID:-global.anthropic.claude-sonnet-4-6} \
-  --env AGENTCORE_RUNTIME_URL=$STOCK_A2A_URL
+  --env PORT=9000 --env "STOCK_MCP_URL=$STOCK_MCP_URL" --env "AGENT_BEARER_TOKEN=$BEARER_TOKEN" \
+  --env "BEDROCK_MODEL_ID=${BEDROCK_MODEL_ID:-global.anthropic.claude-sonnet-4-6}" \
+  --env "AGENTCORE_RUNTIME_URL=$STOCK_A2A_URL"
 ```
 
 ### Step 4: Deploy the Orchestrator
 
 ```bash
+source session.sh && \
+STOCK_A2A_URL=$(runtime_url stock_a2a_agent) && \
 agentcore configure -e orchestrator.py --protocol A2A \
   --requirements-file requirements.txt --authorizer-config "$AUTH_CONFIG" \
-  --region $REGION --non-interactive
+  --region "$REGION" --non-interactive && \
 agentcore deploy --agent orchestrator \
-  --env STOCK_A2A_URL=$STOCK_A2A_URL --env AGENT_BEARER_TOKEN=$BEARER_TOKEN \
-  --env BEDROCK_MODEL_ID=${BEDROCK_MODEL_ID:-global.anthropic.claude-sonnet-4-6}
-
-export ORCH_ARN="<orchestrator runtime ARN>"
+  --env "STOCK_A2A_URL=$STOCK_A2A_URL" --env "AGENT_BEARER_TOKEN=$BEARER_TOKEN" \
+  --env "BEDROCK_MODEL_ID=${BEDROCK_MODEL_ID:-global.anthropic.claude-sonnet-4-6}"
 ```
 
 ### Step 5: Test
 
 ```bash
-curl -s -X POST "https://bedrock-agentcore.$REGION.amazonaws.com/runtimes/$(echo -n $ORCH_ARN | jq -sRr '@uri')/invocations/?qualifier=DEFAULT" \
+source session.sh && \
+ORCH_URL=$(runtime_url orchestrator) && \
+curl -s -X POST "${ORCH_URL}?qualifier=DEFAULT" \
   -H "Content-Type: application/json" \
   -H "Authorization: Bearer $BEARER_TOKEN" \
   -H "X-Amzn-Bedrock-AgentCore-Runtime-Session-Id: $(uuidgen)$(uuidgen)" \
@@ -161,12 +162,12 @@ curl -s -X POST "https://bedrock-agentcore.$REGION.amazonaws.com/runtimes/$(echo
     "params": {"message": {"role": "user",
       "parts": [{"kind": "text", "text": "How is NVDA stock doing today?"}],
       "messageId": "test-1"}}
-  }' | jq .
+  }' | jq -r 'if .result.artifacts then [.result.artifacts[0].parts[].text] | join("") else (.error // .result.status) end'
 ```
 
-Expect `"state": "completed"` and the answer split across many `parts` (the agents stream it). To read it as one piece, end the command with `| jq -r '[.result.artifacts[0].parts[].text] | join("")'` instead of `| jq .`. The first call takes 30–45 s (three cold starts in a row).
+Expect something like "NVIDIA Corporation (NVDA) is currently trading at **$…**, down **…%**". The first call takes 30–45 s (three cold starts in a row). The agents stream their answer in many `parts`; the `jq` filter joins them, and prints the failure status instead if there's no answer (replace it with `jq .` to see the raw response).
 
-To confirm the whole chain ran, tail each runtime's log group, `aws logs tail /aws/bedrock-agentcore/runtimes/<agent-id>-DEFAULT --since 10m` (the agent ID is the last part of its ARN): the orchestrator logs a POST to the stock agent's URL, the stock agent logs `POST /`, and the MCP server logs a `CallToolRequest`. A `401` in those logs means the bearer token baked into an agent has expired — run `cognito_refresh_token` and redeploy that agent with `--auto-update-on-conflict`.
+To confirm the whole chain ran, tail each runtime's log group, `aws logs tail /aws/bedrock-agentcore/runtimes/<agent-id>-DEFAULT --since 10m` (the agent ID is the last part of its ARN): the orchestrator logs a POST to the stock agent's URL, the stock agent logs `POST /`, and the MCP server logs a `CallToolRequest`. A `401` in those logs means the token fixed into an agent at deploy time has expired (a day after that deploy): re-run Step 3's second block and Step 4 — each updates its agent in place with a fresh token.
 
 ### Step 6: Clean up
 
@@ -174,7 +175,7 @@ To confirm the whole chain ran, tail each runtime's log group, `aws logs tail /a
 agentcore destroy --agent orchestrator --force --delete-ecr-repo
 agentcore destroy --agent stock_a2a_agent --force --delete-ecr-repo
 agentcore destroy --agent stock_mcp_server --force --delete-ecr-repo
-aws cognito-idp delete-user-pool --user-pool-id $POOL_ID --region $REGION
+source session.sh && aws cognito-idp delete-user-pool --user-pool-id "$POOL_ID" --region "$REGION" && rm .env.cognito
 ```
 
 `agentcore destroy` removes each runtime with its IAM role, memory, workload identity and uploaded code. Kept, so you can read them later — delete them in the CloudWatch console (or with `aws logs delete-log-group`) when you no longer need them:
@@ -183,12 +184,25 @@ aws cognito-idp delete-user-pool --user-pool-id $POOL_ID --region $REGION
 - the memories' log groups, `/aws/vendedlogs/bedrock-agentcore/memory/APPLICATION_LOGS/<memory-id>`
 - log delivery settings named after the runtime and memory IDs (free)
 
-The toolkit also leaves a build cache, `.bedrock_agentcore/` (~300 MB), in this folder; it's git-ignored and safe to delete.
+Leave the account-level setup the toolkit made on your first deploy — the `bedrock-agentcore-codebuild-sources-<account>-<region>` S3 bucket, the `aws/spans` log group and the `TransactionSearchXRayAccess` logs policy — it's reused by every AgentCore lab. The toolkit also leaves a build cache, `.bedrock_agentcore/` (~300 MB), in this folder; it's git-ignored and safe to delete.
+
+### Troubleshooting Part 2
+
+| You see | What is happening | Fix |
+|---|---|---|
+| `Error: set REGION, COGNITO_USERNAME and COGNITO_PASSWORD first.` | Step 1 hasn't run in this folder yet (there's no `.env.cognito`) | Run Step 1 |
+| `Error: no AgentCore runtime named '...' — deploy it first.` | The step before hasn't been run, or its deploy failed | Run that step; `agentcore status --agent <name>` shows its state |
+| `Error: can't reach the user pool saved in .env.cognito` | Your AWS login expired, or the pool was deleted | `aws sso login --profile <p>`; if the pool is gone, `rm .env.cognito` and run Step 1 again |
+| `Error: run this from the multi-agent-on-agentcore folder.` | The terminal is in another folder | `cd` into this folder |
+| The configure summary says `Authorization: IAM (default)` | `agentcore configure` ran without the Cognito authorizer (outside these blocks, or with an empty `$AUTH_CONFIG`) — callers with a bearer token will be rejected | `agentcore destroy --agent <name> --force --delete-ecr-repo`, then run its step again |
+| `ExpiredTokenException` from an `aws` or `agentcore` command | The terminal isn't using your SSO profile, or the session expired | See the section README's troubleshooting table |
+| Step 5 prints `"code": -32001, "message": "Token has expired"` | The token in your request has expired, so AgentCore rejects it before the orchestrator runs (nothing shows in its logs). The Step 5 block fetches a fresh one each time; this happens when a request reuses `$BEARER_TOKEN` set by an earlier command | Paste Step 5 as written |
+| Step 5 answers with an apology instead of a price ("…returned a 401 Unauthorized error…"); the orchestrator's log shows `GET …stock_a2a_agent…/.well-known/agent-card.json "HTTP/1.1 401 Unauthorized"` | The token fixed into the orchestrator or the Stock Agent at deploy time has expired (a day after that deploy) | Re-run Step 3's second block and Step 4, then Step 5 |
 
 ## Notes
 
 - **Ports on AgentCore:** HTTP agents use 8080, MCP servers 8000 (`/mcp`), A2A agents 9000. `stock_a2a_agent.py` switches to 9000 automatically inside the AgentCore container.
-- **Agent-to-agent auth:** for a classroom demo the deployed agents reuse your Cognito access token (`AGENT_BEARER_TOKEN`), which expires after an hour. In production, give each agent its own machine identity with AgentCore Identity (OAuth2 client-credentials) instead.
+- **Agent-to-agent auth:** for a classroom demo the deployed agents reuse your Cognito access token (`AGENT_BEARER_TOKEN`), fixed in at deploy time. `setup_cognito.sh` makes those tokens last a day (Cognito's maximum) so the chain outlasts a lab session. In production, give each agent its own machine identity with AgentCore Identity (OAuth2 client-credentials) instead.
 - **Model:** set `BEDROCK_MODEL_ID` (e.g. with `--env BEDROCK_MODEL_ID=...`) to change the model.
 
 ## Groq edition (no Bedrock models)
@@ -200,38 +214,43 @@ The toolkit also leaves a build cache, `.bedrock_agentcore/` (~300 MB), in this 
 **AgentCore:** the same steps, with the Groq entrypoints and two extra `--env` flags on each agent deploy. Agent names come from the file names, so every `--agent` flag uses `stock_a2a_agent_groq` / `orchestrator_groq`:
 
 ```bash
-export GROQ_API_KEY=...            # or: set -a; source ../../.env; set +a
-export GROQ_MODEL_ID=openai/gpt-oss-120b
+export GROQ_MODEL_ID=openai/gpt-oss-120b     # GROQ_API_KEY comes from .env (or: export GROQ_API_KEY=...)
 
-# Step 2 — MCP server: unchanged (optionally add --disable-memory --deployment-type container to its configure too)
+# Steps 1–2 — unchanged (optionally add --disable-memory --deployment-type container to the MCP server's configure too)
 
-# Step 3 — Stock Agent
+# Step 3 — Stock Agent (the block stops if GROQ_API_KEY is empty)
+source session.sh && [ -n "$GROQ_API_KEY" ] && \
+STOCK_MCP_URL=$(runtime_url stock_mcp_server mcp) && \
 agentcore configure -e stock_a2a_agent_groq.py --protocol A2A \
   --requirements-file requirements-groq.txt --authorizer-config "$AUTH_CONFIG" \
-  --region $REGION --non-interactive --disable-memory --deployment-type container
+  --region "$REGION" --non-interactive --disable-memory --deployment-type container && \
 agentcore deploy --agent stock_a2a_agent_groq \
-  --env PORT=9000 --env STOCK_MCP_URL=$STOCK_MCP_URL --env AGENT_BEARER_TOKEN=$BEARER_TOKEN \
-  --env GROQ_API_KEY="$GROQ_API_KEY" --env GROQ_MODEL_ID=$GROQ_MODEL_ID
-# ... then the second deploy with --auto-update-on-conflict and AGENTCORE_RUNTIME_URL, plus the same two GROQ flags
+  --env PORT=9000 --env "STOCK_MCP_URL=$STOCK_MCP_URL" --env "AGENT_BEARER_TOKEN=$BEARER_TOKEN" \
+  --env "GROQ_API_KEY=$GROQ_API_KEY" --env "GROQ_MODEL_ID=$GROQ_MODEL_ID"
+# ... then Step 3's second block with `runtime_url stock_a2a_agent_groq`, `--agent stock_a2a_agent_groq` and the same two GROQ flags
 
 # Step 4 — Orchestrator
+source session.sh && [ -n "$GROQ_API_KEY" ] && \
+STOCK_A2A_URL=$(runtime_url stock_a2a_agent_groq) && \
 agentcore configure -e orchestrator_groq.py --protocol A2A \
   --requirements-file requirements-groq.txt --authorizer-config "$AUTH_CONFIG" \
-  --region $REGION --non-interactive --disable-memory --deployment-type container
+  --region "$REGION" --non-interactive --disable-memory --deployment-type container && \
 agentcore deploy --agent orchestrator_groq \
-  --env STOCK_A2A_URL=$STOCK_A2A_URL --env AGENT_BEARER_TOKEN=$BEARER_TOKEN \
-  --env GROQ_API_KEY="$GROQ_API_KEY" --env GROQ_MODEL_ID=$GROQ_MODEL_ID
+  --env "STOCK_A2A_URL=$STOCK_A2A_URL" --env "AGENT_BEARER_TOKEN=$BEARER_TOKEN" \
+  --env "GROQ_API_KEY=$GROQ_API_KEY" --env "GROQ_MODEL_ID=$GROQ_MODEL_ID"
+
+# Step 5 — as above, with `runtime_url orchestrator_groq`
 
 # Step 6 — clean up
 agentcore destroy --agent orchestrator_groq --force --delete-ecr-repo
 agentcore destroy --agent stock_a2a_agent_groq --force --delete-ecr-repo
 agentcore destroy --agent stock_mcp_server --force --delete-ecr-repo
-aws cognito-idp delete-user-pool --user-pool-id $POOL_ID --region $REGION
+source session.sh && aws cognito-idp delete-user-pool --user-pool-id "$POOL_ID" --region "$REGION" && rm .env.cognito
 ```
 
-- The answer streams back in many parts; to print all of it use `jq -r '[.result.artifacts[0].parts[].text] | join("")'` instead of `.parts[0].text`.
+- The answer streams back in many parts; to print all of it use `jq -r 'if .result.artifacts then [.result.artifacts[0].parts[].text] | join("") else (.error // .result.status) end'` instead of `.parts[0].text` (it prints the failure status if there's no answer).
 - `GROQ_API_KEY` is stored as a runtime environment variable (visible in the console); for production use Secrets Manager or AgentCore Identity.
 - `--deployment-type container` builds each image in CodeBuild, so only your source (a few KB) is uploaded; the default direct code deploy uploads a ~100 MB zip per agent, which is painful on a slow connection. `--disable-memory` skips the short-term memory the toolkit would otherwise create for each agent (~2.5 minutes; this lab doesn't use it).
-- The Cognito token lasts an hour and is fixed into each agent at deploy time: run `cognito_refresh_token` before every deploy that passes `AGENT_BEARER_TOKEN`, and run Step 5 within the hour.
-- Step 6 doesn't remove everything: `agentcore destroy` leaves the `bedrock-agentcore-codebuild-sources-<account>-<region>` S3 bucket, the runtime and CodeBuild log groups, the trace delivery sources/destinations, the `aws/spans` log group and the `TransactionSearchXRayAccess` logs resource policy. Delete them in the console (CloudWatch → Logs, S3) if you don't need them.
+- The Cognito token is fixed into each agent at deploy time and lasts a day; `source session.sh` fetches a fresh one at the start of every block. After a day, re-run Steps 3 and 4 (Groq versions) to refresh the agents' tokens.
+- Step 6 leaves the runtime and CodeBuild log groups and the trace delivery sources/destinations; delete them in the CloudWatch console if you don't need them. Keep the account-level setup (the `bedrock-agentcore-codebuild-sources-<account>-<region>` S3 bucket, the `aws/spans` log group and the `TransactionSearchXRayAccess` logs policy) — every AgentCore lab reuses it.
 - Tested end to end on AgentCore Runtime with `openai/gpt-oss-120b`: orchestrator → Stock Agent → MCP server, one request traced through all three runtimes.
