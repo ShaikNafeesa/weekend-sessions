@@ -29,13 +29,32 @@
 
 Every lab calls AWS and a Bedrock model, from three different places: notebooks, shell scripts, and the deployed agent. Set these up once:
 
-1. **Log in to AWS and tell every tool which profile to use.** With SSO:
+1. **Log in to AWS, and put your settings where every tool finds them.** Run these from the repo root, replacing `<your-profile>` with your AWS CLI profile name.
+
+   Log in (SSO sessions expire after some hours; when you see `ExpiredToken`, run this again):
    ```bash
    aws sso login --profile <your-profile>
-   export AWS_PROFILE=<your-profile> AWS_REGION=us-east-1
+   ```
+   Add this section's settings to the repo's `.env` (notebooks opened in VS Code load it into the kernel), then open `.env` and set `AWS_PROFILE` to your profile:
+   ```bash
+   cat section-06-production-deployment/.env.example >> .env
+   ```
+   [`.env.example`](.env.example) explains each line: your AWS profile and region, `REGION` for the multi-agent lab, `AWS_PAGER=` (empty, so scripts never stop at `(END)`), a commented-out Nova model for step 2, and the Cognito test user.
+   Shell scripts and `python agent.py` only see your terminal, not `.env`. Make the course venv load `.env` every time it's activated (once; safe to paste twice; on Windows Git Bash use `.venv/Scripts/activate`):
+   ```bash
+   grep -q '_course_env' .venv/bin/activate || cat >> .venv/bin/activate <<'EOF'
+
+   # Load the repo's .env every time this venv is activated
+   _course_env="$(dirname "$VIRTUAL_ENV")/.env"
+   if [ -f "$_course_env" ]; then
+       set -a; . "$_course_env"; set +a
+   fi
+   unset _course_env
+   EOF
+   source .venv/bin/activate
    aws sts get-caller-identity          # must print your account, not an error
    ```
-   Put the same `AWS_PROFILE=` and `AWS_REGION=` lines in the repo's `.env` too. **Notebooks** opened in VS Code load `.env` into the kernel. **Shell scripts and `python agent.py`** only see your shell, so in every new terminal run `set -a; source ../../.env; set +a` (from a lab folder) or the `export` above. SSO sessions expire after some hours; when you see `ExpiredToken`, run `aws sso login` again.
+   From now on every terminal that activates the venv has your profile and model; VS Code activates it in new terminals automatically. After editing `.env`, open a new terminal (or run `source .venv/bin/activate` again). If you ever recreate `.venv`, paste the block again. Without this step, run `set -a; source ../../.env; set +a` from a lab folder in each new terminal.
 
 2. **Make sure the model works in your account.** The labs default to `global.anthropic.claude-sonnet-4-6` (Claude Sonnet 4.6). Anthropic models need a one-time **use-case form** per AWS account: Bedrock console → Model catalog → open any Claude model → submit the use-case details; access starts about 15 minutes later. Check it:
    ```bash
@@ -45,11 +64,12 @@ Every lab calls AWS and a Bedrock model, from three different places: notebooks,
    ```
    If that fails with `Model use case details have not been submitted for this account`, use Amazon Nova until the form is approved. All five labs were tested end to end with it:
    ```bash
-   export BEDROCK_MODEL_ID=us.amazon.nova-2-lite-v1:0      # and add the same line to .env for the notebooks
+   export BEDROCK_MODEL_ID=us.amazon.nova-2-lite-v1:0
    ```
+   To make it stick, uncomment the `BEDROCK_MODEL_ID` line in `.env` (step 1) and open a new terminal; restart the notebook kernel too.
    Every lab reads `BEDROCK_MODEL_ID`: the notebooks directly, the ECS and Lambda deploy scripts pass it into the deployment, and on AgentCore you pass it with `agentcore deploy --env BEDROCK_MODEL_ID=...` (see the multi-agent README).
 
-3. **Turn off the AWS CLI pager** in the terminal you run scripts from: `export AWS_PAGER=""`. Otherwise long command output opens in a viewer, the script stops at `(END)`, and nothing happens until you press `q`.
+3. **The AWS CLI pager is off** if you did step 1 (`AWS_PAGER=` in `.env`). Otherwise run `export AWS_PAGER=""` in the terminal you run scripts from — without it, long command output opens in a viewer, the script stops at `(END)`, and nothing happens until you press `q`.
 
 4. **Pick the course virtual environment as the notebook kernel.** In VS Code: Select Kernel (top right) → Python Environments → `.venv`. If notebooks can't find files that sit next to them (e.g. `weather_openapi.json`), see Troubleshooting below.
 
