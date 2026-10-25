@@ -7,7 +7,7 @@
 | `lambda/` | AWS Lambda behind API Gateway | Serverless contract-analysis agent |
 | `agentcore-gateway/` | AgentCore Gateway | Turn a REST API (OpenAPI spec in S3) into MCP tools for an agent |
 | `multi-agent-on-agentcore/` | AgentCore Runtime (MCP + A2A) | Finance orchestrator → stock agent (A2A) → stock tools (MCP) |
-| `setup_cognito.sh` | Cognito | OAuth user pool + token for the multi-agent deployment |
+| `setup_cognito.sh` | Cognito | OAuth user pool + token for the multi-agent deployment (saves the pool in `.env.cognito` and reuses it on later runs) |
 
 ## Which target when?
 
